@@ -5,6 +5,7 @@ import { createServer as createViteServer } from "vite";
 import { searchLocations, getFullWeatherData, reverseGeocode } from "./server/weatherService.js";
 import { LocationData, FullWeatherData } from "./src/types.js";
 import { GoogleGenAI } from "@google/genai";
+import { generateContentWithFallback } from "./server/geminiHelper.js";
 import { serverCache } from "./server/cache.js";
 import { generateAIPlan } from "./server/plannerService.js";
 import { generateAIRadarAnalysis } from "./server/radarService.js";
@@ -387,7 +388,7 @@ app.post("/api/intelligence/compare", async (req, res) => {
           Keep the language strictly objective, professional, and elegant. Start directly with the markdown response. No introductory pleasantries. If mentioning correlations, be careful to use language such as 'is associated with', 'the data suggests', or 'the observed pattern indicates' instead of claiming definite causation.`;
         }
 
-        const response = await ai.models.generateContent({
+        const response = await generateContentWithFallback(ai, {
           model: "gemini-3.5-flash",
           contents: prompt
         });

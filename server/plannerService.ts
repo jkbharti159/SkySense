@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { generateContentWithFallback } from "./geminiHelper.js";
 import { FullWeatherData, DailyForecast, HourlyForecast, LocationData } from "../src/types.js";
 import { searchLocations, getFullWeatherData } from "./weatherService.js";
 
@@ -361,7 +362,7 @@ export async function generateAIPlan(
     
     Extract variables, compare dates, identify best/alternative/avoid profiles, compute hourly comfort scores, and map risks.`;
 
-    const response = await ai.models.generateContent({
+    const response = await generateContentWithFallback(ai, {
       model: "gemini-3.5-flash",
       contents: userPrompt,
       config: {

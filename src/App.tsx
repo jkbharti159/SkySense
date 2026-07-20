@@ -305,7 +305,6 @@ export default function App() {
       // Step 1: Check user-selected saved location preference
       if (savedPreferredLocation) {
         setInitStepText("Loading saved location preference...");
-        await new Promise(resolve => setTimeout(resolve, 600));
         setCentralLocation(savedPreferredLocation);
         
         const loc: LocationData = {
@@ -324,7 +323,6 @@ export default function App() {
 
       // Step 2: No saved location, query approximate IP-based geolocation
       setInitStepText("Detecting your approximate location...");
-      await new Promise(resolve => setTimeout(resolve, 800));
 
       try {
         const res = await fetch("/api/location/detect");
@@ -346,8 +344,7 @@ export default function App() {
       } catch (err) {
         console.error("IP Geolocation initialization failed:", err);
         
-        setInitStepText("Unable to automatically detect location. Using fallback...");
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        setInitStepText("Unable to detect location automatically.");
         
         const fallback: CentralLocationState = {
           city: "Kolkata",
@@ -364,8 +361,6 @@ export default function App() {
         setCentralLocation(fallback);
         await fetchWeather(DEFAULT_LOCATION, { source: "fallback", accuracy: "approximate" });
       } finally {
-        setInitStepText("Preparing your personalized dashboard...");
-        await new Promise(resolve => setTimeout(resolve, 600));
         setIsInitializingLocation(false);
       }
     }
@@ -831,9 +826,13 @@ export default function App() {
             <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500/10 rounded-full filter blur-3xl -z-10" />
             <div className="absolute bottom-0 left-0 w-64 h-64 bg-teal-500/10 rounded-full filter blur-3xl -z-10" />
             
-            <div className="relative p-6 bg-indigo-500/10 rounded-full border border-indigo-500/20 mb-6 animate-pulse">
-              <Compass className="h-16 w-16 text-indigo-400 animate-spin-slow" />
-              <MapPin className="h-6 w-6 text-teal-400 absolute bottom-1 right-1 animate-bounce" />
+            <div className="relative mb-6 select-none">
+              <img 
+                src="https://raw.githubusercontent.com/jkbharti159/Images/main/ChatGPT%20Image%20Jul%2018%2C%202026%2C%2011_47_53%20PM.png" 
+                alt="Location Intelligence Sync Logo" 
+                className="h-28 w-28 object-contain mx-auto drop-shadow-[0_0_15px_rgba(99,102,241,0.3)] animate-pulse" 
+                referrerPolicy="no-referrer"
+              />
             </div>
             
             <h2 className="text-2xl font-black text-white tracking-tight mb-2">Location Intelligence Sync</h2>

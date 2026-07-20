@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { generateContentWithFallback } from "./geminiHelper.js";
 import { 
   CurrentWeather, 
   HourlyForecast, 
@@ -419,7 +420,7 @@ Write:
 
 All factual data (temperatures, weather conditions, rain percentage, scores) MUST match the verified inputs exactly. Never invent fake values!`;
 
-    const response = await ai.models.generateContent({
+    const response = await generateContentWithFallback(ai, {
       model: "gemini-3.5-flash",
       contents: prompt,
       config: {

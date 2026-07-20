@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { generateContentWithFallback } from "./geminiHelper.js";
 import { RadarScene } from "../src/utils/radarModel.js";
 
 export interface RadarAnalysisRequest {
@@ -82,7 +83,7 @@ export async function generateAIRadarAnalysis(req: RadarAnalysisRequest): Promis
     
     Generate the analysis based strictly on the above data.`;
 
-    const response = await ai.models.generateContent({
+    const response = await generateContentWithFallback(ai, {
       model: "gemini-3.5-flash",
       contents: userPrompt,
       config: {

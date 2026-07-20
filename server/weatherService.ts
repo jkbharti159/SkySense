@@ -15,34 +15,116 @@ function getConditionText(code: number): string {
   return getWeatherConditionByCode(code);
 }
 
-// 1. Fetch Geocoding suggestions from Open-Meteo
+// Helper to search via OpenStreetMap Nominatim API, which is extremely accurate for postal/zip/PIN codes
+async function searchNominatim(query: string): Promise<LocationData[]> {
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=10&addressdetails=1&accept-language=en`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "SkySenseWeatherIntelligence/1.0 (jkbharti159@gmail.com)"
+      }
+    });
+    if (!res.ok) throw new Error("Nominatim search request failed");
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+
+    return data.map((item: any) => {
+      const addr = item.address || {};
+      
+      // Extract specific local area details (e.g. neighborhood, suburb, quarter, hamlet)
+      const localArea = addr.neighbourhood || addr.suburb || addr.quarter || addr.village || addr.hamlet || addr.city_district || addr.road;
+      
+      // Extract broader municipality details
+      const cityArea = addr.city || addr.town || addr.municipality;
+      
+      // Construct a highly detailed display name focusing on the local area name
+      let mainName = "";
+      if (localArea && cityArea && localArea.toLowerCase() !== cityArea.toLowerCase()) {
+        mainName = `${localArea}, ${cityArea}`;
+      } else {
+        mainName = localArea || cityArea || addr.county || item.display_name.split(",")[0];
+      }
+      
+      // Append postcode if available to guarantee confirmation to the user
+      let displayName = mainName;
+      if (addr.postcode && !mainName.includes(addr.postcode)) {
+        displayName = `${mainName} (${addr.postcode})`;
+      }
+
+      const country = addr.country || "";
+      const admin1 = addr.state || addr.region || addr.county || "";
+
+      return {
+        name: displayName,
+        country,
+        admin1,
+        lat: parseFloat(item.lat),
+        lon: parseFloat(item.lon)
+      };
+    });
+  } catch (err) {
+    console.error("Nominatim search failed:", err);
+    return [];
+  }
+}
+
+// 1. Fetch Geocoding suggestions from Open-Meteo or Nominatim
 export async function searchLocations(query: string): Promise<LocationData[]> {
   const cacheKey = `geo:${query.toLowerCase().trim()}`;
   const cached = serverCache.get<LocationData[]>(cacheKey);
   if (cached) return cached;
 
+  const trimmedQuery = query.trim();
+  const hasDigits = /\d/.test(trimmedQuery);
+  // Postal/zip/PIN code: usually short (between 3 and 12 chars) and contains at least one digit
+  const isPostalQuery = hasDigits && trimmedQuery.length >= 3 && trimmedQuery.length <= 12;
+
+  if (isPostalQuery) {
+    console.log(`[Geocoding] Postal query detected: "${trimmedQuery}". Querying Nominatim first.`);
+    const nominatimResults = await searchNominatim(trimmedQuery);
+    if (nominatimResults.length > 0) {
+      serverCache.set(cacheKey, nominatimResults, 3600); // cache for 1 hour
+      return nominatimResults;
+    }
+    console.log(`[Geocoding] Nominatim returned 0 results. Falling back to standard Open-Meteo for "${trimmedQuery}".`);
+  }
+
+  // Fallback / Standard city search via Open-Meteo Geocoding API
   try {
-    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=10&language=en`;
+    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(trimmedQuery)}&count=10&language=en`;
     const res = await fetch(url);
     if (!res.ok) throw new Error("Geocoding API request failed");
     
     const data = await res.json();
-    if (!data.results || !Array.isArray(data.results)) return [];
+    if (data.results && Array.isArray(data.results)) {
+      const locations: LocationData[] = data.results.map((item: any) => ({
+        name: item.name,
+        country: item.country || "",
+        admin1: item.admin1 || "",
+        lat: item.latitude,
+        lon: item.longitude
+      }));
 
-    const locations: LocationData[] = data.results.map((item: any) => ({
-      name: item.name,
-      country: item.country || "",
-      admin1: item.admin1 || "",
-      lat: item.latitude,
-      lon: item.longitude
-    }));
-
-    serverCache.set(cacheKey, locations, 3600); // cache for 1 hour
-    return locations;
+      if (locations.length > 0) {
+        serverCache.set(cacheKey, locations, 3600); // cache for 1 hour
+        return locations;
+      }
+    }
   } catch (err) {
-    console.error("Geocoding failed:", err);
-    return [];
+    console.error("Open-Meteo geocoding failed:", err);
   }
+
+  // If Open-Meteo failed or returned 0 results, and we didn't search Nominatim yet, try Nominatim as a fallback
+  if (!isPostalQuery) {
+    console.log(`[Geocoding] Standard search returned 0 results. Trying Nominatim fallback for "${trimmedQuery}".`);
+    const nominatimResults = await searchNominatim(trimmedQuery);
+    if (nominatimResults.length > 0) {
+      serverCache.set(cacheKey, nominatimResults, 3600); // cache for 1 hour
+      return nominatimResults;
+    }
+  }
+
+  return [];
 }
 
 // 2. Perform Reverse Geocoding via Nominatim
@@ -61,10 +143,25 @@ export async function reverseGeocode(lat: number, lon: number): Promise<Location
     
     if (!res.ok) throw new Error("Reverse geocoding failed");
     const data = await res.json();
+    const addr = data.address || {};
 
-    const name = data.address?.city || data.address?.town || data.address?.village || data.address?.suburb || data.name || "Selected Location";
-    const country = data.address?.country || "";
-    const admin1 = data.address?.state || data.address?.region || "";
+    const localArea = addr.neighbourhood || addr.suburb || addr.quarter || addr.village || addr.hamlet || addr.city_district || addr.road;
+    const cityArea = addr.city || addr.town || addr.municipality;
+
+    let mainName = "";
+    if (localArea && cityArea && localArea.toLowerCase() !== cityArea.toLowerCase()) {
+      mainName = `${localArea}, ${cityArea}`;
+    } else {
+      mainName = localArea || cityArea || addr.county || data.name || "Selected Location";
+    }
+
+    let name = mainName;
+    if (addr.postcode && !mainName.includes(addr.postcode)) {
+      name = `${mainName} (${addr.postcode})`;
+    }
+
+    const country = addr.country || "";
+    const admin1 = addr.state || addr.region || "";
 
     const location: LocationData = { name, country, admin1, lat, lon };
     serverCache.set(cacheKey, location, 86400); // Cache for 24 hours
@@ -86,26 +183,39 @@ export async function getFullWeatherData(lat: number, lon: number, customLocatio
   const cached = serverCache.get<FullWeatherData>(cacheKey);
   if (cached) return cached;
 
-  // If customLocation is not supplied, reverse geocode it
-  const location = customLocation || await reverseGeocode(lat, lon);
+  const locationPromise = customLocation ? Promise.resolve(customLocation) : reverseGeocode(lat, lon);
+  const forecastUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation_probability,weather_code,wind_speed_10m,uv_index,visibility&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,uv_index_max,precipitation_probability_max,wind_speed_10m_max&timezone=auto`;
+  const aqUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=european_aqi,us_aqi,pm2_5,pm10,nitrogen_dioxide,ozone,carbon_monoxide,sulphur_dioxide`;
+
+  let location: LocationData;
+  let forecastData: any;
+  let aqData: any = null;
 
   try {
-    // A. Fetch Forecast from Open-Meteo
-    const forecastUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation_probability,weather_code,wind_speed_10m,uv_index,visibility&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,uv_index_max,precipitation_probability_max,wind_speed_10m_max&timezone=auto`;
-    const forecastRes = await fetch(forecastUrl);
+    const [locResult, forecastRes, aqRes] = await Promise.all([
+      locationPromise,
+      fetch(forecastUrl),
+      fetch(aqUrl).catch(e => {
+        console.error("AQI fetch failed:", e);
+        return null;
+      })
+    ]);
+
+    location = locResult;
+
     if (!forecastRes.ok) throw new Error(`Open-Meteo Forecast failed: ${forecastRes.statusText}`);
-    const forecastData = await forecastRes.json();
+    forecastData = await forecastRes.json();
 
-    // B. Fetch Air Quality from Open-Meteo
-    const aqUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=european_aqi,us_aqi,pm2_5,pm10,nitrogen_dioxide,ozone,carbon_monoxide,sulphur_dioxide`;
-    let aqData: any = null;
-    try {
-      const aqRes = await fetch(aqUrl);
-      if (aqRes.ok) aqData = await aqRes.json();
-    } catch (e) {
-      console.error("AQI fetch failed:", e);
+    if (aqRes && aqRes.ok) {
+      aqData = await aqRes.json();
     }
+  } catch (err) {
+    console.error("Parallel fetch failed, using fallback:", err);
+    const fallbackLoc = customLocation || await locationPromise.catch(() => ({ name: "Your Location", country: "Detected via GPS", lat, lon }));
+    return getFallbackWeatherData(fallbackLoc);
+  }
 
+  try {
     // C. Map Current Weather
     const c = forecastData.current;
     const currentSunrise = forecastData.daily?.sunrise?.[0] || "";
