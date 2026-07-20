@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { FullWeatherData, LocationData, UserPreferences, CentralLocationState } from "./types.js";
 import Weather3DBackground from "./components/Weather3DBackground.tsx";
+import PostalResolverModal from "./components/PostalResolverModal.tsx";
+import { detectPostalFormat } from "./utils/postalHelper.js";
 import WeatherMap from "./components/WeatherMap.tsx";
 import WeatherTrendCharts from "./components/WeatherTrendCharts.tsx";
 import AirQualityIndicator from "./components/AirQualityIndicator.tsx";
@@ -145,6 +147,7 @@ export default function App() {
   });
   const [initStepText, setInitStepText] = useState<string>("");
   const [isInitializingLocation, setIsInitializingLocation] = useState<boolean>(true);
+  const [isPostalModalOpen, setIsPostalModalOpen] = useState(false);
 
   // Search input and autocomplete suggestions
   const [searchQuery, setSearchQuery] = useState("");
@@ -575,21 +578,104 @@ export default function App() {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => handleSearchChange(e.target.value)}
-                  placeholder="Search city (e.g. Kolkata)..."
-                  className="w-full bg-slate-950/70 text-xs text-white border border-white/15 rounded-xl pl-8.5 pr-8 py-2 focus:outline-none focus:border-indigo-500 transition-all placeholder:text-slate-500"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      const trim = searchQuery.trim();
+                      const coordMatch = trim.match(/^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/);
+                      const isPostal = trim.length >= 3 && detectPostalFormat(trim).isValid;
+                      if (coordMatch) {
+                        const lat = parseFloat(coordMatch[1]);
+                        const lon = parseFloat(coordMatch[2]);
+                        fetchWeather({
+                          name: `${lat.toFixed(4)}, ${lon.toFixed(4)}`,
+                          country: "Coordinated Query",
+                          lat,
+                          lon
+                        }, { source: "search", accuracy: "precise" });
+                        setSearchQuery("");
+                        setSuggestions([]);
+                      } else if (isPostal) {
+                        setIsPostalModalOpen(true);
+                      } else if (suggestions.length > 0) {
+                        const loc = suggestions[0];
+                        fetchWeather(loc, { source: "search", accuracy: "precise" });
+                        setSearchQuery("");
+                        setSuggestions([]);
+                      }
+                    }
+                  }}
+                  placeholder="Search city, ZIP, or lat/lon (e.g. 700001)..."
+                  className="w-full bg-slate-950/70 text-xs text-white border border-white/15 rounded-xl pl-8.5 pr-14 py-2 focus:outline-none focus:border-indigo-500 transition-all placeholder:text-slate-500"
                 />
-                <button
-                  onClick={handleGPSLocation}
-                  className="absolute right-2.5 top-1.5 text-slate-400 hover:text-white p-1 rounded-md bg-slate-900 border border-white/5 hover:bg-slate-800 transition-all"
-                  title="Detect GPS"
-                >
-                  <Navigation size={10} className={geolocationLoading ? "animate-pulse" : ""} />
-                </button>
+                <div className="absolute right-2 top-1.5 flex items-center gap-1">
+                  <button
+                    onClick={() => setIsPostalModalOpen(true)}
+                    className="text-slate-400 hover:text-indigo-400 p-1 rounded-md bg-slate-900 border border-white/5 hover:bg-slate-800 transition-all cursor-pointer"
+                    title="Universal PIN/ZIP Resolution System"
+                  >
+                    <Compass size={11} className="text-indigo-400 animate-spin-slow" />
+                  </button>
+                  <button
+                    onClick={handleGPSLocation}
+                    className="text-slate-400 hover:text-white p-1 rounded-md bg-slate-900 border border-white/5 hover:bg-slate-800 transition-all cursor-pointer"
+                    title="Detect GPS"
+                  >
+                    <Navigation size={10} className={geolocationLoading ? "animate-pulse" : ""} />
+                  </button>
+                </div>
               </div>
 
               {/* Suggestions List Box */}
-              {suggestions.length > 0 && (
+              {(suggestions.length > 0 || (searchQuery.trim().length >= 3 && detectPostalFormat(searchQuery).isValid) || searchQuery.trim().match(/^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/)) && (
                 <div className="absolute z-50 left-0 right-0 mt-1.5 bg-slate-950 border border-white/10 rounded-xl shadow-2xl max-h-56 overflow-y-auto divide-y divide-white/5 animate-fade-in">
+                  {/* Coordinates match item */}
+                  {(() => {
+                    const coordMatch = searchQuery.trim().match(/^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/);
+                    if (coordMatch) {
+                      return (
+                        <button
+                          onClick={() => {
+                            const lat = parseFloat(coordMatch[1]);
+                            const lon = parseFloat(coordMatch[2]);
+                            fetchWeather({
+                              name: `${lat.toFixed(4)}, ${lon.toFixed(4)}`,
+                              country: "Coordinated Query",
+                              lat,
+                              lon
+                            }, { source: "search", accuracy: "precise" });
+                            setSearchQuery("");
+                            setSuggestions([]);
+                          }}
+                          className="w-full text-left px-4 py-2.5 text-xs text-emerald-400 hover:bg-emerald-950/30 transition-all flex items-center gap-2 border-b border-white/5 cursor-pointer"
+                        >
+                          <MapPin size={12} className="text-emerald-400 shrink-0" />
+                          <span className="font-semibold">Go to Coordinates: {coordMatch[1]}, {coordMatch[2]}</span>
+                        </button>
+                      );
+                    }
+                    return null;
+                  })()}
+
+                  {/* Postal match recommendation */}
+                  {(() => {
+                    const trim = searchQuery.trim();
+                    const isPostal = trim.length >= 3 && detectPostalFormat(trim).isValid;
+                    if (isPostal) {
+                      return (
+                        <button
+                          onClick={() => {
+                            setIsPostalModalOpen(true);
+                          }}
+                          className="w-full text-left px-4 py-2.5 text-xs text-indigo-300 hover:bg-indigo-950/30 transition-all flex items-center gap-2 border-b border-indigo-500/10 font-bold cursor-pointer"
+                        >
+                          <Compass size={12} className="text-indigo-400 animate-spin-slow shrink-0" />
+                          <span>Resolve Postal Area: "{trim.toUpperCase()}"</span>
+                        </button>
+                      );
+                    }
+                    return null;
+                  })()}
+
                   {suggestions.map((loc, idx) => (
                     <button
                       key={idx}
@@ -598,7 +684,7 @@ export default function App() {
                         setSuggestions([]);
                         fetchWeather(loc, { source: "search", accuracy: "precise" });
                       }}
-                      className="w-full text-left px-4 py-2.5 text-xs text-slate-300 hover:bg-slate-900 hover:text-white transition-all flex flex-col"
+                      className="w-full text-left px-4 py-2.5 text-xs text-slate-300 hover:bg-slate-900 hover:text-white transition-all flex flex-col cursor-pointer"
                     >
                       <span className="font-semibold text-white">{loc.name}</span>
                       <span className="text-[10px] text-slate-400">{loc.admin1 ? `${loc.admin1}, ` : ""}{loc.country}</span>
@@ -1426,6 +1512,16 @@ export default function App() {
           </p>
         </div>
       </footer>
+
+      {/* Postal Code Intelligence Resolution System */}
+      <PostalResolverModal
+        isOpen={isPostalModalOpen}
+        onClose={() => setIsPostalModalOpen(false)}
+        onConfirm={(loc, resolvedDetails) => {
+          fetchWeather(loc, resolvedDetails);
+          setSearchQuery("");
+        }}
+      />
     </div>
   );
 }

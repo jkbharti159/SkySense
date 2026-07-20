@@ -31,6 +31,20 @@ export async function generateContentWithFallback(
       lastError = err;
       const errMsg = err?.message || String(err);
       console.warn(`[Gemini Helper] Failed with model ${modelName}. Error: ${errMsg}`);
+      
+      // If we are out of quota or rate-limited, subsequent models using the same key will also fail.
+      // Terminate early to prevent excessive logs, latency, and redundant API calls.
+      if (
+        errMsg.includes("429") || 
+        errMsg.includes("quota") || 
+        errMsg.includes("RESOURCE_EXHAUSTED") ||
+        errMsg.includes("limit") ||
+        err?.status === "RESOURCE_EXHAUSTED" ||
+        err?.code === 429
+      ) {
+        console.warn(`[Gemini Helper] Quota limits reached. Aborting consecutive fallback calls.`);
+        break;
+      }
     }
   }
 

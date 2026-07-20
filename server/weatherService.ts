@@ -15,6 +15,154 @@ function getConditionText(code: number): string {
   return getWeatherConditionByCode(code);
 }
 
+// Helper to search Indian PIN code post offices using government postal pincode API
+async function getPostOfficesForIndiaPincode(pincode: string): Promise<LocationData[]> {
+  try {
+    const res = await fetch(`https://api.postalpincode.in/pincode/${pincode}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!Array.isArray(data) || !data[0] || data[0].Status !== "Success" || !Array.isArray(data[0].PostOffice)) {
+      return [];
+    }
+
+    const poList = data[0].PostOffice;
+    if (poList.length === 0) return [];
+
+    // Get general pincode coordinates via Nominatim as reference
+    let fallbackLat = 22.5726;
+    let fallbackLon = 88.3639;
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?postalcode=${pincode}&country=India&format=json&limit=1`;
+      const fallbackRes = await fetch(url, {
+        headers: {
+          "User-Agent": "SkySenseWeatherIntelligence/1.0 (jkbharti159@gmail.com)"
+        }
+      });
+      if (fallbackRes.ok) {
+        const fallbackData = await fallbackRes.json();
+        if (Array.isArray(fallbackData) && fallbackData.length > 0) {
+          fallbackLat = parseFloat(fallbackData[0].lat);
+          fallbackLon = parseFloat(fallbackData[0].lon);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to get fallback coordinates for India PIN code:", e);
+    }
+
+    return poList.map((po: any) => {
+      const cleanPoName = po.Name.replace(/post\s*office/gi, "").replace(/\s+/g, " ").trim();
+      return {
+        name: cleanPoName,
+        country: "India",
+        admin1: po.State || po.Circle || "",
+        lat: fallbackLat,
+        lon: fallbackLon
+      };
+    });
+  } catch (err) {
+    console.error("India pincode search failed:", err);
+    return [];
+  }
+}
+
+// Helper to find nearby post offices in a bounding box around a postal code (for worldwide ZIP codes)
+async function findPostOfficesNear(lat: number, lon: number, postcode: string, country: string, state: string): Promise<LocationData[]> {
+  try {
+    const viewbox = `${lon - 0.05},${lat + 0.05},${lon + 0.05},${lat - 0.05}`;
+    const url = `https://nominatim.openstreetmap.org/search?q=post+office&format=json&limit=5&addressdetails=1&viewbox=${viewbox}&bounded=1&accept-language=en`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "SkySenseWeatherIntelligence/1.0 (jkbharti159@gmail.com)"
+      }
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+
+    return data.map((item: any) => {
+      const addr = item.address || {};
+      const mainName = item.name || addr.suburb || addr.neighbourhood || item.display_name.split(",")[0] || "Postal Area";
+      const cleanMainName = mainName.replace(/post\s*office/gi, "").replace(/\s+/g, " ").trim() || "Postal Area";
+      return {
+        name: cleanMainName,
+        country: addr.country || country,
+        admin1: addr.state || addr.region || state,
+        lat: parseFloat(item.lat),
+        lon: parseFloat(item.lon)
+      };
+    });
+  } catch (err) {
+    console.error("Failed to find nearby post offices:", err);
+    return [];
+  }
+}
+
+// Helper to format LocationData from OSM Nominatim result
+function formatLocationFromNominatim(item: any): LocationData {
+  const addr = item.address || {};
+  const postcode = addr.postcode || "";
+  
+  const country = addr.country || "";
+  const admin1 = addr.state || addr.region || "";
+  const county = addr.county || "";
+  
+  // 1. Identify specific local area within the city or town
+  const localKeys = ["neighbourhood", "suburb", "quarter", "hamlet", "village", "city_district", "subdistrict", "borough", "road"];
+  let localName = "";
+  for (const key of localKeys) {
+    if (addr[key]) {
+      localName = addr[key];
+      break;
+    }
+  }
+  
+  // 2. Identify broader city/town/municipality
+  const cityKeys = ["town", "city", "municipality"];
+  let cityName = "";
+  for (const key of cityKeys) {
+    if (addr[key]) {
+      cityName = addr[key];
+      break;
+    }
+  }
+  
+  let mainName = "";
+  if (localName && cityName && localName.toLowerCase() !== cityName.toLowerCase()) {
+    mainName = `${localName}, ${cityName}`;
+  } else if (localName) {
+    mainName = localName;
+  } else if (cityName) {
+    mainName = cityName;
+  } else if (county) {
+    mainName = county;
+  } else {
+    // Fallback to parsed display name parts
+    const parts = (item.display_name || "").split(",").map((p: string) => p.trim()).filter(Boolean);
+    const undesirable = new Set([
+      country.toLowerCase(),
+      admin1.toLowerCase(),
+      county.toLowerCase(),
+      postcode.toLowerCase(),
+      "england", "scotland", "wales", "northern ireland"
+    ]);
+    const candidateParts = parts.filter((part: string) => {
+      const lower = part.toLowerCase();
+      if (undesirable.has(lower)) return false;
+      if (/^\d+$/.test(part)) return false;
+      return true;
+    });
+    mainName = candidateParts[0] || parts[0] || "Selected Location";
+  }
+  
+  return {
+    name: mainName,
+    country,
+    admin1,
+    lat: parseFloat(item.lat),
+    lon: parseFloat(item.lon)
+  };
+}
+
 // Helper to search via OpenStreetMap Nominatim API, which is extremely accurate for postal/zip/PIN codes
 async function searchNominatim(query: string): Promise<LocationData[]> {
   try {
@@ -25,43 +173,28 @@ async function searchNominatim(query: string): Promise<LocationData[]> {
       }
     });
     if (!res.ok) throw new Error("Nominatim search request failed");
-    const data = await res.json();
+    let data = await res.json();
+    
+    // If standard search on postal/ZIP code yielded nothing, try explicit postalcode lookup
+    if (!Array.isArray(data) || data.length === 0) {
+      console.log(`[Geocoding] Standard Nominatim search returned 0 results. Trying postalcode-specific search for "${query}".`);
+      const urlPostal = `https://nominatim.openstreetmap.org/search?postalcode=${encodeURIComponent(query)}&format=json&limit=10&addressdetails=1&accept-language=en`;
+      const resPostal = await fetch(urlPostal, {
+        headers: {
+          "User-Agent": "SkySenseWeatherIntelligence/1.0 (jkbharti159@gmail.com)"
+        }
+      });
+      if (resPostal.ok) {
+        const dataPostal = await resPostal.json();
+        if (Array.isArray(dataPostal)) {
+          data = dataPostal;
+        }
+      }
+    }
+
     if (!Array.isArray(data)) return [];
 
-    return data.map((item: any) => {
-      const addr = item.address || {};
-      
-      // Extract specific local area details (e.g. neighborhood, suburb, quarter, hamlet)
-      const localArea = addr.neighbourhood || addr.suburb || addr.quarter || addr.village || addr.hamlet || addr.city_district || addr.road;
-      
-      // Extract broader municipality details
-      const cityArea = addr.city || addr.town || addr.municipality;
-      
-      // Construct a highly detailed display name focusing on the local area name
-      let mainName = "";
-      if (localArea && cityArea && localArea.toLowerCase() !== cityArea.toLowerCase()) {
-        mainName = `${localArea}, ${cityArea}`;
-      } else {
-        mainName = localArea || cityArea || addr.county || item.display_name.split(",")[0];
-      }
-      
-      // Append postcode if available to guarantee confirmation to the user
-      let displayName = mainName;
-      if (addr.postcode && !mainName.includes(addr.postcode)) {
-        displayName = `${mainName} (${addr.postcode})`;
-      }
-
-      const country = addr.country || "";
-      const admin1 = addr.state || addr.region || addr.county || "";
-
-      return {
-        name: displayName,
-        country,
-        admin1,
-        lat: parseFloat(item.lat),
-        lon: parseFloat(item.lon)
-      };
-    });
+    return data.map((item: any) => formatLocationFromNominatim(item));
   } catch (err) {
     console.error("Nominatim search failed:", err);
     return [];
@@ -76,15 +209,51 @@ export async function searchLocations(query: string): Promise<LocationData[]> {
 
   const trimmedQuery = query.trim();
   const hasDigits = /\d/.test(trimmedQuery);
-  // Postal/zip/PIN code: usually short (between 3 and 12 chars) and contains at least one digit
-  const isPostalQuery = hasDigits && trimmedQuery.length >= 3 && trimmedQuery.length <= 12;
+  
+  // Check if query contains a word that looks like a zip/pin/postal code (3-10 characters containing letters and numbers or just numbers)
+  const words = trimmedQuery.split(/\s+/);
+  const containsPostalCode = words.some(w => {
+    if (/^\d{3,8}$/.test(w)) return true;
+    if (/^[A-Z0-9]{3,8}$/i.test(w) && /\d/.test(w) && /[A-Z]/i.test(w)) return true;
+    return false;
+  });
+
+  const isPostalQuery = containsPostalCode || (hasDigits && trimmedQuery.length >= 3 && trimmedQuery.length <= 12);
 
   if (isPostalQuery) {
     console.log(`[Geocoding] Postal query detected: "${trimmedQuery}". Querying Nominatim first.`);
+    
+    // Check if there is an Indian PIN code (6 digits) in the query
+    const indiaPinMatch = trimmedQuery.match(/\b\d{6}\b/);
+    if (indiaPinMatch) {
+      const pincode = indiaPinMatch[0];
+      console.log(`[Geocoding] Indian PIN code detected: "${pincode}". Fetching from Indian Post Office API.`);
+      const poResults = await getPostOfficesForIndiaPincode(pincode);
+      if (poResults.length > 0) {
+        serverCache.set(cacheKey, poResults, 3600); // cache for 1 hour
+        return poResults;
+      }
+    }
+
     const nominatimResults = await searchNominatim(trimmedQuery);
     if (nominatimResults.length > 0) {
-      serverCache.set(cacheKey, nominatimResults, 3600); // cache for 1 hour
-      return nominatimResults;
+      // For any non-Indian postal query, let's also enrich it by finding the actual post office inside that zip/postal area
+      const primaryResult = nominatimResults[0];
+      const postcodeMatch = trimmedQuery.match(/\b[A-Z0-9-]{3,10}\b/i);
+      const postcode = postcodeMatch ? postcodeMatch[0] : (primaryResult.name.match(/\(([^)]+)\)/)?.[1] || trimmedQuery);
+      
+      console.log(`[Geocoding] Enrichment: Searching for post offices near "${primaryResult.name}" coords (${primaryResult.lat}, ${primaryResult.lon})`);
+      const nearbyPOs = await findPostOfficesNear(
+        primaryResult.lat,
+        primaryResult.lon,
+        postcode,
+        primaryResult.country,
+        primaryResult.admin1
+      );
+      
+      const combinedResults = [...nearbyPOs, ...nominatimResults];
+      serverCache.set(cacheKey, combinedResults, 3600); // cache for 1 hour
+      return combinedResults;
     }
     console.log(`[Geocoding] Nominatim returned 0 results. Falling back to standard Open-Meteo for "${trimmedQuery}".`);
   }
@@ -143,27 +312,8 @@ export async function reverseGeocode(lat: number, lon: number): Promise<Location
     
     if (!res.ok) throw new Error("Reverse geocoding failed");
     const data = await res.json();
-    const addr = data.address || {};
-
-    const localArea = addr.neighbourhood || addr.suburb || addr.quarter || addr.village || addr.hamlet || addr.city_district || addr.road;
-    const cityArea = addr.city || addr.town || addr.municipality;
-
-    let mainName = "";
-    if (localArea && cityArea && localArea.toLowerCase() !== cityArea.toLowerCase()) {
-      mainName = `${localArea}, ${cityArea}`;
-    } else {
-      mainName = localArea || cityArea || addr.county || data.name || "Selected Location";
-    }
-
-    let name = mainName;
-    if (addr.postcode && !mainName.includes(addr.postcode)) {
-      name = `${mainName} (${addr.postcode})`;
-    }
-
-    const country = addr.country || "";
-    const admin1 = addr.state || addr.region || "";
-
-    const location: LocationData = { name, country, admin1, lat, lon };
+    const location = formatLocationFromNominatim(data);
+    
     serverCache.set(cacheKey, location, 86400); // Cache for 24 hours
     return location;
   } catch (err) {

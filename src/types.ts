@@ -138,12 +138,15 @@ export interface UserPreferences {
 
 export interface CentralLocationState {
   city: string;
+  district?: string;
   region: string;
   country: string;
+  countryCode?: string;
+  postalCode?: string;
   latitude: number;
   longitude: number;
   timezone: string;
-  source: 'saved' | 'gps' | 'ip' | 'search' | 'fallback';
-  accuracy: 'approximate' | 'precise';
+  source: 'saved' | 'gps' | 'ip' | 'search' | 'fallback' | 'postal_code';
+  accuracy: 'approximate' | 'precise' | 'postal_area';
   isUserSelected: boolean;
 }
